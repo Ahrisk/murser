@@ -1,9 +1,68 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # ----------------------------
 # Database.py
 # provide the interface to SQL. Only mySQL is supported now.
 # ----------------------------
 import threading
+import time
+import uuid
+import logging
+import functools
+
+
+def next_id(t=None):
+    '''
+    Return next id as 50-char string.
+
+    Args:
+        t: unix timestamp, default to None and using time.time().
+    '''
+    if t is None:
+        t = time.time()
+    return '%015d%s000' % (int(t * 1000), uuid.uuid4().hex)
+
+
+def _porfiling(start, sql=''):
+    t = time.time() - start
+    if t > 0.1:
+        logging.warning('[PROFILING] [DB] %s: %s' % (t, sql))
+    else:
+        logging.info('[PROFILING] [DB] %s: %s' % (t, sql))
+
+
+class DBError(Exception):
+    pass
+
+
+class MultiColumnsError(DBError):
+    pass
+
+
+class _LasyConnection(object):
+
+    def _init(self):
+        self.connection = None
+
+    def cursor(self):
+        if self.connection is None:
+            connection = engine.connection()
+            logging.info('open connection <%s>...' % hex(id(connection)))
+            self.connection = connection
+        return self.connection.cursor()
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def cleanup(self):
+        if self.connection:
+            connection = self.connection
+            self.connection = None
+            logging.info('close connection <%s>...' % hex(id(connection)))
+            connection.close()
 
 
 class _Engine(object):
@@ -39,6 +98,21 @@ class _DbCtx(threading.local):
 _db_ctx = _DbCtx()
 
 
+def create_engine(user, password, database, host='127.0.0.1', port=3306, **kw):
+    import mysql.connector
+    global engine
+    if engine is not None:
+        raise DBError('Engine is already initialized.')
+    params = {'user': user, 'password': password, 'database': database, 'host': host, 'port': port}
+    defaults = {'use_unicode': True, 'charset': 'utf8', 'collation': 'utf8_general_ci', 'autocommit': False}
+    for k, v in defaults.iteritems():
+        params[k] = kw.pop(k, v)
+    params.update(kw)
+    params['buffered'] = True
+    engine = _Engine(lambda: mysql.connector.connect(**params))
+    logging.info('Init mysql engine <%s> ok.' % hex(id(engine)))
+
+
 class _ConnectionCtx(object):
     def __enter__(self):
         global _db_ctx
@@ -49,7 +123,7 @@ class _ConnectionCtx(object):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        global  _db_ctx
+        global _db_ctx
         if self.should_cleanup:
             _db_ctx.cleanup()
 
@@ -59,15 +133,107 @@ def connection():
 
 
 def with_connection(func):
+    @functools.wraps(func)
     def wrapper(*args, **kw):
         with connection():
             return func(*args, **kw)
     return wrapper
 
 
+class _TransactionCtx(object):
+    def __enter__(self):
+        global _db_ctx
+        self.should_close_conn = False
+        if not _db_ctx.is_init():
+            _db_ctx.init()
+            self.should_close_conn = True
+        _db_ctx.transactions = _db_ctx.transactions + 1
+        logging.info('begin transaction...' if _db_ctx.transactions==1 else 'join current transaction...')
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        global _db_ctx
+        _db_ctx.transactions = _db_ctx.transactions - 1
+        try:
+            if _db_ctx.transaction == 0:
+                if exc_type is None:
+                    self.commit()
+                else:
+                    self.rollback()
+        finally:
+            if self.should_close_conn:
+                _db_ctx.cleanup()
+
+    def commit(self):
+        global _db_ctx
+        logging.warning('rollback transaction...')
+        try:
+            _db_ctx.connection.commit()
+            logging.info('commit ok.')
+        except:
+            logging.warning('commit failed. try rollback...')
+            _db_ctx.connection.rollback()
+            logging.warning('rollback ok.')
+            raise
+
+    def rollback(self):
+        global _db_ctx
+        logging.warning('rollback transaction...')
+        _db_ctx.connection.rollback()
+        logging.info('rollback ok.')
+
+
+def transaction():
+    return _TransactionCtx()
+
+
+def with_transaction(func):
+    @functools.wraps(func)
+    def _wrapper(*args, **kw):
+        _start = time.time()
+        with _TransactionCtx():
+            return func(*args, **kw)
+        _porfiling(_start)
+    return _wrapper
+
+
+def _select(sql, first, *args):
+    global _db_ctx
+    cursor = None
+    sql = sql.replace('?', '%s')
+    logging.info('SQL: %s, ARGS: %s' % (sql, args))
+    try:
+        cursor = _db_ctx.connection.cursor()
+        cursor.execute(sql, args)
+        if cursor.description:
+            names = [x[0] for x in cursor.description]
+        if first:
+            values = cursor.fetchone()
+            if not values:
+                return None
+            return {names, values}
+        return [{names, x} for x in cursor.fetchall()]
+    finally:
+        if cursor:
+            cursor.close()
+
+
+@with_connection
+def select_one(sql, *args):
+    return _select(sql, True, args)
+
+
+@with_connection
+def select_int(sql, *args):
+    d = _select(sql, True, args)
+    if len(d) != 1:
+        raise MultiColumnsError('Expect only one column.')
+    return d.values()[0]
+
+
 @with_connection
 def select(sql, *args):
-    pass
+    return _select(sql, False, args)
 
 
 @with_connection
@@ -83,3 +249,7 @@ def delete(sql, *args):
 @with_connection
 def insert(sql, *args):
     pass
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+    create_engine('root', 'oo', 'text')
