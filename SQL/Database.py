@@ -11,6 +11,22 @@ import logging
 import functools
 
 
+class Dict(dict):
+    def __init__(self, names=(), values=(), **kw):
+        super(Dict, self).__init__(**kw)
+        for k, v in zip(names, values):
+            self[k] = v
+
+    def __getattr__(self, item):
+        try:
+            return self[item]
+        except KeyError:
+            raise AttributeError(r"'Dict' object has no attribute '%s'" % item)
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
+
 def next_id(t=None):
     '''
     Return next id as 50-char string.
@@ -23,7 +39,7 @@ def next_id(t=None):
     return '%015d%s000' % (int(t * 1000), uuid.uuid4().hex)
 
 
-def _porfiling(start, sql=''):
+def _profiling(start, sql=''):
     t = time.time() - start
     if t > 0.1:
         logging.warning('[PROFILING] [DB] %s: %s' % (t, sql))
@@ -40,13 +56,12 @@ class MultiColumnsError(DBError):
 
 
 class _LasyConnection(object):
-
-    def _init(self):
+    def __init__(self):
         self.connection = None
 
     def cursor(self):
         if self.connection is None:
-            connection = engine.connection()
+            connection = engine.connect()
             logging.info('open connection <%s>...' % hex(id(connection)))
             self.connection = connection
         return self.connection.cursor()
@@ -82,7 +97,7 @@ class _DbCtx(threading.local):
         self.transactions = 0
 
     def is_init(self):
-        return not self.connection is None
+        return self.connection is not None
 
     def init(self):
         self.connection = _LasyConnection()
@@ -148,7 +163,7 @@ class _TransactionCtx(object):
             _db_ctx.init()
             self.should_close_conn = True
         _db_ctx.transactions = _db_ctx.transactions + 1
-        logging.info('begin transaction...' if _db_ctx.transactions==1 else 'join current transaction...')
+        logging.info('begin transaction...' if _db_ctx.transactions == 1 else 'join current transaction...')
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -193,7 +208,7 @@ def with_transaction(func):
         _start = time.time()
         with _TransactionCtx():
             return func(*args, **kw)
-        _porfiling(_start)
+        _profiling(_start)
     return _wrapper
 
 
@@ -204,6 +219,7 @@ def _select(sql, first, *args):
     logging.info('SQL: %s, ARGS: %s' % (sql, args))
     try:
         cursor = _db_ctx.connection.cursor()
+        logging.info('')
         cursor.execute(sql, args)
         if cursor.description:
             names = [x[0] for x in cursor.description]
@@ -211,8 +227,9 @@ def _select(sql, first, *args):
             values = cursor.fetchone()
             if not values:
                 return None
-            return {names, values}
-        return [{names, x} for x in cursor.fetchall()]
+            return Dict(names, values)
+        return [Dict(names, x) for x in cursor.fetchall()]
+        # return names
     finally:
         if cursor:
             cursor.close()
@@ -233,23 +250,34 @@ def select_int(sql, *args):
 
 @with_connection
 def select(sql, *args):
-    return _select(sql, False, args)
+    return _select(sql, False, *args)
 
 
 @with_connection
+def _update(sql, *args):
+    global _db_ctx
+    cursor = None
+    sql = sql.replace('?', '%s')
+    logging.info('SQL: %s, ARGS: %s' % (sql, args))
+    try:
+        cursor = _db_ctx.connection.cursor()
+        cursor.execute(sql, args)
+        r = cursor.rowcount
+        if _db_ctx.transactions == 0:
+            logging.info('auto commit')
+            _db_ctx.connection.commit()
+        return r
+    finally:
+        if cursor:
+            cursor.close()
+
+
 def update(sql, *args):
-    pass
+    return _update(sql, *args)
 
-
-@with_connection
-def delete(sql, *args):
-    pass
-
-
-@with_connection
-def insert(sql, *args):
-    pass
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
-    create_engine('root', 'oo', 'text')
+    create_engine('root', '', 'test')
+    users = select('select * from userdata where id=?', 1)
+    print(users)
