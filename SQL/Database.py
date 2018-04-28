@@ -237,12 +237,12 @@ def _select(sql, first, *args):
 
 @with_connection
 def select_one(sql, *args):
-    return _select(sql, True, args)
+    return _select(sql, True, *args)
 
 
 @with_connection
 def select_int(sql, *args):
-    d = _select(sql, True, args)
+    d = _select(sql, True, *args)
     if len(d) != 1:
         raise MultiColumnsError('Expect only one column.')
     return d.values()[0]

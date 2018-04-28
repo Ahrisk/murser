@@ -178,25 +178,31 @@ class Model(dict):
     def __setattr__(self, key, value):
         self[key] = value
 
+    @classmethod
     def get(cls, pk):
         d = Database.select_one('select * from %s where %s=?' % (cls.__table__, cls.__primary_key__.name), pk)
         return cls(**d) if d else None
 
+    @classmethod
     def find_first(cls, where, *args):
         d = Database.select_one('select * from %s %s' % (cls.__table__, where), *args)
         return cls(**d) if d else None
 
+    @classmethod
     def find_all(cls, *args):
         L = Database.select('select * from `%s`' % cls.__table__, *args)
         return [cls(**d) for d in L]
 
+    @classmethod
     def find_by(cls, where, *args):
         L = Database.select('select * from `%s` %s' % (cls.__table__, where), *args)
         return [cls(**d) for d in L]
 
+    @classmethod
     def count_all(cls):
         return Database.select_int('select count(`%s`) from `%s`' % (cls.__primary_key__.name, cls.__table__))
 
+    @classmethod
     def count_by(cls, where, *args):
         return Database.select_int('select count(`%s`) from `%s` %s' % (cls.__primary_key__.name,
                                                                         cls.__table__, where), *args)
